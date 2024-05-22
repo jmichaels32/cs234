@@ -12,14 +12,52 @@ import matplotlib.pyplot as plt
 
 from util import export_plot
 
+class EnvironmentWrapper(gym.Wrapper):
+    def __init__(self, env, change_index, geom_friction=-1, geom_margin=-1, body_mass=-1, body_gravcomp=-1):
+        super().__init__(env)
+        self.geom_friction = geom_friction
+        self.geom_margin = geom_margin
+        self.body_mass = body_mass
+        self.body_gravcomp = body_gravcomp
+
+        self.index = 0
+        self.change_index = change_index
+
+    def step(self, action):
+        self._adjust(self.geom_friction, 'geom_friction')
+        self._adjust(self.geom_margin, 'geom_margin')
+        self._adjust(self.body_mass, 'body_mass')
+        self._adjust(self.body_gravcomp, 'body_gravcomp')
+
+        obs, reward, terminated, truncated, info = self.env.step(action)
+
+        if self.env._elapsed_steps % self.change_index == 0:
+            self.index += 1
+        
+        return obs, reward, terminated, truncated, info
+
+    def _adjust(self, values, attribute):
+        if values == -1:
+            return
+        
+        for i in range(len(getattr(self.env.model, attribute))):
+            if attribute == 'body_mass' and i == 0:
+                continue
+
+            if attribute == 'geom_friction':
+                getattr(self.env.model, attribute)[i][0] = values[self.index]
+            else: 
+                getattr(self.env.model, attribute)[i] = values[self.index]
+        
+'''
 class FrictionWrapper(gym.Wrapper):
     def __init__(self, env, initial_friction, friction_increment):
         super().__init__(env)
         self.friction = initial_friction
         self.friction_increment = friction_increment
-        self.step_count = 0
         self.actual_step_count = 0
         self.friction_values = []
+        self.friction_iteration_values = [self.friction + self.friction_increment * i for i in range(1, 3)]
 
     def step(self, action):
         # Adjust the friction parameters
@@ -29,19 +67,32 @@ class FrictionWrapper(gym.Wrapper):
         obs, reward, terminated, truncated, info = self.env.step(action)
         
         # Update step count
-        self.step_count += 1
-        if self.step_count % 1000000 == 0:
+        if self.env._elapsed_steps % 250000 == 0:
             self.actual_step_count += 1
         
         return obs, reward, terminated, truncated, info
 
     def _adjust_friction(self):
         # Gradually increase friction
-        new_friction = self.friction + self.friction_increment * self.actual_step_count
-        for i in range(len(self.env.model.geom_friction)):
-            self.env.model.geom_friction[i] = new_friction
-        self.friction_values.append(new_friction)
-
+        friction_index = self.actual_step_count % 2
+        new_friction = self.friction_iteration_values[friction_index]
+        #new_friction = self.friction + self.friction_increment * self.actual_step_count
+        print(self.env.__dict__)
+        print(self.env)
+        print(dir(self.env))
+        print(self.env._elapsed_steps)
+        print(type(self.env.model))
+        print(dir(self.env.model))
+        print(self.env.model.geom_friction)
+        print(self.env.model.body_mass)
+        print(self.env.model.tendon_stiffness)
+        print(self.env.model.body_gravcomp)
+        print(self.env.model.geom_margin)
+        print("")
+        #for i in range(len(self.env.model.geom_friction)):
+            #self.env.model.geom_friction[i] = new_friction
+        #self.friction_values.append(new_friction)
+'''
 
 def evaluate(env, policy):
     model_return = 0
@@ -78,6 +129,14 @@ class EvalCallback(sb3.common.callbacks.BaseCallback):
         return True
 
 if __name__ == "__main__":
+    total_iterations = 1000000
+    buckets = 10
+
+    friction_values = [1.0, 1.5, 1.0, 1.5, 1.0, 1.5, 1.0, 1.5, 2.0, 0.5]
+    margin_values = [0.001, 0.005, 0.001, 0.005, 0.001, 0.005, 0.001, 0.005, 0.01, 0.0005]
+    mass_values = [4, 5, 4, 5, 4, 5, 4, 5, 6, 3]
+    gravcomp_values = [1, 2, 1, 2, 1, 2, 1, 2, 3, 0]
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--rl-steps",
@@ -89,6 +148,12 @@ if __name__ == "__main__":
         "--early-termination", help="Terminate the episode early", action="store_true"
     )
     parser.add_argument("--seed", default=0)
+
+    parser.add_argument("--geom-friction", type=bool, default=False)
+    parser.add_argument("--geom-margin", type=bool, default=False)
+    parser.add_argument("--body-mass", type=bool, default=False)
+    parser.add_argument("--body-gravcomp", type=bool, default=False)
+
     args = parser.parse_args()
 
     output_path = pathlib.Path(__file__).parent.joinpath(
@@ -99,19 +164,24 @@ if __name__ == "__main__":
     log_path = output_path.joinpath("log.txt")
     scores_output = output_path.joinpath("scores.npy")
     plot_output = output_path.joinpath("scores.png")
-    friction_plot_output = output_path.joinpath("friction.png")
+    #friction_plot_output = output_path.joinpath("friction.png")
 
     env = gym.make(
         "Hopper-v4",
         terminate_when_unhealthy=args.early_termination,
     )
 
+    friction_values = friction_values if args.geom_friction else -1
+    margin_values = margin_values if args.geom_margin else -1
+    mass_values = mass_values if args.body_mass else -1
+    gravcomp_values = gravcomp_values if args.body_gravcomp else -1
+
     # Wrapping the environment to modify friction over time
-    env = FrictionWrapper(env, initial_friction=0.5, friction_increment=10)
+    env = EnvironmentWrapper(env, total_iterations // 10, geom_friction=friction_values, geom_margin=margin_values, body_mass=mass_values, body_gravcomp=gravcomp_values)
 
     agent = sb3.PPO("MlpPolicy", env, verbose=1)
     eval_callback = EvalCallback(
-        args.rl_steps // 100,
+        args.rl_steps // 200,
         10,
         env,
         lambda obs: agent.predict(obs)[0],
@@ -131,6 +201,7 @@ if __name__ == "__main__":
     export_plot(returns, "Returns", "Hopper-v4", plot_output)
 
     # Plot friction values over time
+    '''
     plt.figure()
     plt.plot(env.friction_values)
     plt.xlabel("Steps")
@@ -138,3 +209,4 @@ if __name__ == "__main__":
     plt.title("Friction Over Time")
     plt.savefig(friction_plot_output)
     plt.close()
+    '''
