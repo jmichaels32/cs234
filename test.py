@@ -156,9 +156,17 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    name = "geom_friction"
+    if args.geom_margin:
+        name = "geom_margin"
+    elif args.body_mass:
+        name = "body_mass"
+    elif args.body_gravcomp:
+        name = "body_gravcomp"
+
     output_path = pathlib.Path(__file__).parent.joinpath(
         "results",
-        f"Hopper-v4-early-termination={args.early_termination}-seed={args.seed}",
+        f"Hopper-v4-env={name}-seed={args.seed}",
     )
     model_output = output_path.joinpath("model.zip")
     log_path = output_path.joinpath("log.txt")
