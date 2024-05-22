@@ -1,181 +1,140 @@
-try: 
+import argparse
+import pathlib
+import time
+
+try:
     import gymnasium as gym
 except ImportError:
     import gym
+import numpy as np
+import stable_baselines3 as sb3
+import matplotlib.pyplot as plt
+
+from util import export_plot
+
+class FrictionWrapper(gym.Wrapper):
+    def __init__(self, env, initial_friction, friction_increment):
+        super().__init__(env)
+        self.friction = initial_friction
+        self.friction_increment = friction_increment
+        self.step_count = 0
+        self.actual_step_count = 0
+        self.friction_values = []
+
+    def step(self, action):
+        # Adjust the friction parameters
+        self._adjust_friction()
+        
+        # Perform the step
+        obs, reward, terminated, truncated, info = self.env.step(action)
+        
+        # Update step count
+        self.step_count += 1
+        if self.step_count % 1000000 == 0:
+            self.actual_step_count += 1
+        
+        return obs, reward, terminated, truncated, info
+
+    def _adjust_friction(self):
+        # Gradually increase friction
+        new_friction = self.friction + self.friction_increment * self.actual_step_count
+        for i in range(len(self.env.model.geom_friction)):
+            self.env.model.geom_friction[i] = new_friction
+        self.friction_values.append(new_friction)
 
 
-class RewardModel(nn.Module):
-    def __init__(
-        self, obs_dim: int, action_dim: int, hidden_dim: int, r_min: float, r_max: float
-    ):
-        """Initialize a reward model
+def evaluate(env, policy):
+    model_return = 0
+    T = env.spec.max_episode_steps
+    obs, _ = env.reset()
+    for _ in range(T):
+        action = policy(obs)
+        obs, reward, terminated, truncated, _ = env.step(action)
+        done = terminated or truncated
+        model_return += reward
+        if done:
+            break
+    return model_return
 
-        Parameters
-        ----------
-        obs_dim : int
-            Dimension of the observation space
-        action_dim : int
-            Dimension of the action space
-        hidden_dim : int
-            Number of neurons in the hidden layer
-        r_min : float
-            Minimum reward value
-        r_max : float
-            Maximum reward value
-
-        TODO:
-        Define self.net to be a neural network with a single hidden layer of size
-        hidden_dim that takes as input an observation and an action and outputs a
-        reward value. Use LeakyRelu as hidden activation function, and set the
-        activation function of the output layer so that the output of the network
-        is guaranteed to be in the interval [0, 1].
-
-        Define also self.optimizer to optimize the network parameters. Use a default
-        AdamW optimizer.
-        """
-
+class EvalCallback(sb3.common.callbacks.BaseCallback):
+    def __init__(self, eval_period, num_episodes, env, policy):
         super().__init__()
-        #######################################################
-        #########   YOUR CODE HERE - 2-10 lines.   ############
-        self.net = nn.Sequential(
-            nn.Linear(obs_dim + action_dim, hidden_dim), 
-            nn.LeakyReLU(),
-            nn.Linear(hidden_dim, 1),
-            nn.Sigmoid()
-        )
-        self.optimizer = torch.optim.AdamW(self.net.parameters())
-        #######################################################
-        #########          END YOUR CODE.          ############
-        self.r_min = r_min
-        self.r_max = r_max
+        self.eval_period = eval_period
+        self.num_episodes = num_episodes
+        self.env = env
+        self.policy = policy
 
-    def forward(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        """Forward callback for the RewardModel
+        self.returns = []
 
-        Parameters
-        ----------
-        obs : torch.Tensor
-            Batch of observations
-        action : torch.Tensor
-            Batch of actions
+    def _on_step(self):
+        if self.n_calls % self.eval_period == 0:
+            print(f"Evaluating after {self.n_calls} steps")
+            model_returns = []
+            for _ in range(self.num_episodes):
+                model_returns.append(evaluate(self.env, self.policy))
+            self.returns.append(np.mean(model_returns))
 
-        Returns
-        -------
-        torch.Tensor
-            Batch of predicted rewards
-
-        TODO:
-        Use self.net to predict the rewards associated with the input
-        (observation, action) pairs, and scale them so that they are
-        within [self.r_min, self.r_max].
-
-        """
-        if obs.ndim == 3:
-            B, T = obs.shape[:2]
-            assert action.ndim == 3 and action.shape[:2] == (B, T)
-            obs = obs.reshape(-1, obs.shape[-1])
-            action = action.reshape(-1, action.shape[-1])
-            needs_reshape = True
-        else:
-            needs_reshape = False
-
-        rewards = torch.zeros(obs.shape[0])
-        #######################################################
-        #########   YOUR CODE HERE - 2-3 lines.   ############
-        rewards = self.net(torch.cat((obs, action), -1))
-        rewards = self.r_min + rewards * (self.r_max - self.r_min)
-        #######################################################
-        #########          END YOUR CODE.          ############
-
-        if needs_reshape:
-            rewards = rewards.reshape(B, T)
-        return rewards
-
-    def compute_reward(self, obs: np.ndarray, action: np.ndarray) -> float:
-        """Given an (observation, action) pair, return the predicted reward.
-
-        Parameters
-        ----------
-        obs : np.ndarray (obs_dim, )
-            A numpy array with an observation.
-        action : np.ndarray (act_dim, )
-            A numpy array with an action
-
-        Returns
-        -------
-        float
-            The predicted reward for the state-action pair.
-
-        TODO:
-        Return the predicted reward for the given (observation, action) pair. Pay
-        attention to the argument and return types!
-
-        Hint: If you use the forward method of this module remember that it takes
-              in a batch of observations and a batch of actions.
-        """
-        #######################################################
-        #########   YOUR CODE HERE - 1-4 lines.   ############
-        obs = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
-        action = torch.tensor(action, dtype=torch.float32).unsqueeze(0)
-        return self.forward(obs, action).item()
-        #######################################################
-        #########          END YOUR CODE.          ############
-
-    def update(self, batch: Tuple[torch.Tensor]):
-        """Given a batch of data, update the reward model.
-
-        Parameters
-        ----------
-        batch : Tuple[torch.Tensor]
-            A batch with two trajectories (observations and actions) and a label
-            encoding which one is prefered (0 if it is the first one, 1 otherwise).
-
-        TODO:
-        Compute the cumulative predicted rewards for each trajectory, and calculate
-        your loss following the Bradley-Terry preference model.
-
-        Hint 1: https://pytorch.org/docs/stable/generated/torch.nn.functional.cross_entropy.html
-        Hint 2: https://stackoverflow.com/questions/57161524/trying-to-understand-cross-entropy-loss-in-pytorch
-        """
-        obs1, obs2, act1, act2, label = batch
-
-        loss = torch.zeros(1)
-        #######################################################
-        #########   YOUR CODE HERE - 5-10 lines.   ############
-        rewards1 = self.forward(obs1, act1)
-        rewards2 = self.forward(obs2, act2)
-
-        rewards_sum1 = torch.sum(rewards1, 1)
-        rewards_sum2 = torch.sum(rewards2, 1)
-        logits = torch.stack((rewards_sum1, rewards_sum2), dim=-1)
-        labels = torch.stack((1 - label, label), dim=1)
-
-        loss = F.cross_entropy(logits, labels)
-        #######################################################
-        #########          END YOUR CODE.          ############
-
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-        return loss.item()
-
-
-def main(args):
-    env = gym.make(args.env_name)
-    # Change the environment over time (i.e. when using Hopper-v4, we may change the friction applied to a joint)
-    env.change_env()
-    env.reset()
-    for _ in range(1000):
-        env.render()
-        env.step(env.action_space.sample())
-    env.close()
-
-
+        # If the callback returns False, training is aborted early.
+        return True
 
 if __name__ == "__main__":
-    from argparse import ArgumentParser
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--rl-steps",
+        type=int,
+        help="The number of learning iterations",
+        default=1000000,
+    )
+    parser.add_argument(
+        "--early-termination", help="Terminate the episode early", action="store_true"
+    )
+    parser.add_argument("--seed", default=0)
+    args = parser.parse_args()
 
-    parser = ArgumentParser()
-    parser.add_argument("--env-name", default="Hopper-v4")
-    
-    main(parser.parse_args())
+    output_path = pathlib.Path(__file__).parent.joinpath(
+        "results",
+        f"Hopper-v4-early-termination={args.early_termination}-seed={args.seed}",
+    )
+    model_output = output_path.joinpath("model.zip")
+    log_path = output_path.joinpath("log.txt")
+    scores_output = output_path.joinpath("scores.npy")
+    plot_output = output_path.joinpath("scores.png")
+    friction_plot_output = output_path.joinpath("friction.png")
+
+    env = gym.make(
+        "Hopper-v4",
+        terminate_when_unhealthy=args.early_termination,
+    )
+
+    # Wrapping the environment to modify friction over time
+    env = FrictionWrapper(env, initial_friction=0.5, friction_increment=10)
+
+    agent = sb3.PPO("MlpPolicy", env, verbose=1)
+    eval_callback = EvalCallback(
+        args.rl_steps // 100,
+        10,
+        env,
+        lambda obs: agent.predict(obs)[0],
+    )
+    start = time.perf_counter()
+    agent.learn(args.rl_steps, callback=eval_callback)
+    end = time.perf_counter()
+
+    # Log the results
+    returns = eval_callback.returns
+    if not output_path.exists():
+        output_path.mkdir(parents=True)
+    agent.save(model_output)
+    with open(log_path, "w") as f:
+        f.write(f"Wall time elapsed: {end-start:.2f}s\n")
+    np.save(scores_output, returns)
+    export_plot(returns, "Returns", "Hopper-v4", plot_output)
+
+    # Plot friction values over time
+    plt.figure()
+    plt.plot(env.friction_values)
+    plt.xlabel("Steps")
+    plt.ylabel("Friction")
+    plt.title("Friction Over Time")
+    plt.savefig(friction_plot_output)
+    plt.close()
