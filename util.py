@@ -32,3 +32,15 @@ def export_plot(ys, ylabel, title, filename):
     plt.title(title)
     plt.savefig(filename)
     plt.close()
+
+def export_plot_with_changes(ys, ylabel, title, filename, change_steps):
+    plt.figure()
+    plt.plot(range(len(ys)), ys, label='Returns')
+    for step in change_steps:
+        plt.axvline(x=step, color='r', linestyle='--', label='Env Change' if step == change_steps[0] else "")
+    plt.xlabel("Training Episode")
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.legend()
+    plt.savefig(filename)
+    plt.close()

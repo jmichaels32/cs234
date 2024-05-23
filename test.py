@@ -10,7 +10,7 @@ import numpy as np
 import stable_baselines3 as sb3
 import matplotlib.pyplot as plt
 
-from util import export_plot
+from util import export_plot, export_plot_with_changes
 
 class EnvironmentWrapper(gym.Wrapper):
     def __init__(self, env, change_index, geom_friction=-1, geom_margin=-1, body_mass=-1, body_gravcomp=-1):
@@ -20,8 +20,10 @@ class EnvironmentWrapper(gym.Wrapper):
         self.body_mass = body_mass
         self.body_gravcomp = body_gravcomp
 
+        self.step_index = 0
         self.index = 0
         self.change_index = change_index
+        self.change_steps = []
 
     def step(self, action):
         self._adjust(self.geom_friction, 'geom_friction')
@@ -31,9 +33,14 @@ class EnvironmentWrapper(gym.Wrapper):
 
         obs, reward, terminated, truncated, info = self.env.step(action)
 
-        if self.env._elapsed_steps % self.change_index == 0:
-            self.index += 1
-        
+        self.step_index += 1
+        if self.step_index % self.change_index == 0:
+            if self.index < 9:
+                self.index += 1
+            self.change_steps.append(self.index * 20)
+        if self.step_index > 3000000:
+            print(self.step_index)
+
         return obs, reward, terminated, truncated, info
 
     def _adjust(self, values, attribute):
@@ -45,7 +52,8 @@ class EnvironmentWrapper(gym.Wrapper):
                 continue
 
             if attribute == 'geom_friction':
-                getattr(self.env.model, attribute)[i][0] = values[self.index]
+                #getattr(self.env.model, attribute)[i][0] = values[self.index] # When not using tuples
+                getattr(self.env.model, attribute)[i] = values[self.index] # When using tuples
             else: 
                 getattr(self.env.model, attribute)[i] = values[self.index]
         
@@ -130,19 +138,29 @@ class EvalCallback(sb3.common.callbacks.BaseCallback):
 
 if __name__ == "__main__":
     total_iterations = 1000000
+    steps_per_eval = 200
     buckets = 10
 
-    friction_values = [1.0, 1.5, 1.0, 1.5, 1.0, 1.5, 1.0, 1.5, 2.0, 0.5]
-    margin_values = [0.001, 0.005, 0.001, 0.005, 0.001, 0.005, 0.001, 0.005, 0.01, 0.0005]
-    mass_values = [4, 5, 4, 5, 4, 5, 4, 5, 6, 3]
-    gravcomp_values = [1, 2, 1, 2, 1, 2, 1, 2, 3, 0]
+    friction_values = [(1.0, 5.e-3, 1.e-4), 
+                       (10., 5.e-1, 1.e-2), 
+                       (1.0, 5.e-3, 1.e-4), 
+                       (10., 5.e-1, 1.e-2), 
+                       (1.0, 5.e-3, 1.e-4), 
+                       (10., 5.e-1, 1.e-2), 
+                       (1.0, 5.e-3, 1.e-4), 
+                       (10., 5.e-1, 1.e-2), 
+                       (5.0, 5.e-2, 1.e-3), 
+                       (20., 5., 1.e-1)]
+    margin_values = [0.001, 0.1, 0.001, 0.1, 0.001, 0.1, 0.001, 0.1, 0.01, 1]
+    mass_values = [4, 16, 4, 16, 4, 16, 4, 16, 8, 32]
+    gravcomp_values = [1, 10, 1, 10, 1, 10, 1, 10, 5, 50]
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--rl-steps",
         type=int,
         help="The number of learning iterations",
-        default=1000000,
+        default=total_iterations,
     )
     parser.add_argument(
         "--early-termination", help="Terminate the episode early", action="store_true"
@@ -185,11 +203,11 @@ if __name__ == "__main__":
     gravcomp_values = gravcomp_values if args.body_gravcomp else -1
 
     # Wrapping the environment to modify friction over time
-    env = EnvironmentWrapper(env, total_iterations // 10, geom_friction=friction_values, geom_margin=margin_values, body_mass=mass_values, body_gravcomp=gravcomp_values)
+    env = EnvironmentWrapper(env, 3000000 // buckets, geom_friction=friction_values, geom_margin=margin_values, body_mass=mass_values, body_gravcomp=gravcomp_values)
 
     agent = sb3.PPO("MlpPolicy", env, verbose=1)
     eval_callback = EvalCallback(
-        args.rl_steps // 200,
+        args.rl_steps // steps_per_eval,
         10,
         env,
         lambda obs: agent.predict(obs)[0],
@@ -206,7 +224,7 @@ if __name__ == "__main__":
     with open(log_path, "w") as f:
         f.write(f"Wall time elapsed: {end-start:.2f}s\n")
     np.save(scores_output, returns)
-    export_plot(returns, "Returns", "Hopper-v4", plot_output)
+    export_plot_with_changes(returns, "Returns", "Hopper-v4", plot_output, env.change_steps)
 
     # Plot friction values over time
     '''
