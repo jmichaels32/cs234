@@ -9,6 +9,8 @@ except ImportError:
 import numpy as np
 import stable_baselines3 as sb3
 import matplotlib.pyplot as plt
+import torch
+from torch.nn import functional as F
 
 from util import export_plot, export_plot_with_changes
 
@@ -57,7 +59,6 @@ class EnvironmentWrapper(gym.Wrapper):
             else: 
                 getattr(self.env.model, attribute)[i] = values[self.index]
         
-'''
 class FrictionWrapper(gym.Wrapper):
     def __init__(self, env, initial_friction, friction_increment):
         super().__init__(env)
@@ -97,10 +98,10 @@ class FrictionWrapper(gym.Wrapper):
         print(self.env.model.body_gravcomp)
         print(self.env.model.geom_margin)
         print("")
-        #for i in range(len(self.env.model.geom_friction)):
-            #self.env.model.geom_friction[i] = new_friction
+        for i in range(len(self.env.model.geom_friction)):
+            self.env.model.geom_friction[i] = new_friction
         #self.friction_values.append(new_friction)
-'''
+
 
 def evaluate(env, policy):
     model_return = 0
@@ -136,6 +137,28 @@ class EvalCallback(sb3.common.callbacks.BaseCallback):
         # If the callback returns False, training is aborted early.
         return True
 
+
+def ppo_loss_l2_init(prev_params, policy, policy_loss, ent_coef, entropy_loss, vf_coef, value_loss):
+    # L2 Init loss
+    if prev_params is not None:
+        curr_params = torch.cat([param.view(-1) for param in policy.parameters()])
+        l2_init_loss = 1e-2 * torch.linalg.norm(curr_params - prev_params)
+    else: 
+        l2_init_loss = 0
+
+    loss = policy_loss + ent_coef * entropy_loss + vf_coef * value_loss + l2_init_loss
+
+# Inspired from Understanding and Improving Convolutional Neural Networks via Concatenated Rectified Linear Units
+# https://arxiv.org/pdf/1603.05201.pdf
+class CReLU(torch.nn.Module):
+    def __init__(self, inplace=False):
+        super(CReLU, self).__init__()
+
+    def forward(self, x):
+        x = torch.cat((x,-x),-1)
+        return F.relu(x)
+    
+    
 if __name__ == "__main__":
     total_iterations = 1000000
     steps_per_eval = 200
@@ -183,7 +206,7 @@ if __name__ == "__main__":
         name = "body_gravcomp"
 
     output_path = pathlib.Path(__file__).parent.joinpath(
-        "results",
+        "results-reset-new",
         f"Hopper-v4-env={name}-seed={args.seed}",
     )
     model_output = output_path.joinpath("model.zip")
@@ -206,6 +229,10 @@ if __name__ == "__main__":
     env = EnvironmentWrapper(env, 3000000 // buckets, geom_friction=friction_values, geom_margin=margin_values, body_mass=mass_values, body_gravcomp=gravcomp_values)
 
     agent = sb3.PPO("MlpPolicy", env, verbose=1)
+    # , policy_kwargs={
+    #     "activation_fn" : torch.nn.ReLU,
+    #     "net_arch" : dict(pi=[64, 64], vf=[64, 64])
+    # })
     eval_callback = EvalCallback(
         args.rl_steps // steps_per_eval,
         10,
